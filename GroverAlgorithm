@@ -1,0 +1,103 @@
+import math
+import warnings
+import numpy as np
+import qiskit.quantum_info as qi
+
+from qiskit import QuantumCircuit, QuantumRegister
+from qiskit.circuit.library import MCMT, ZGate
+from qiskit.visualization import plot_distribution
+from qiskit_aer import AerSimulator
+from qiskit_ibm_runtime import QiskitRuntimeService
+
+def Oracle(marked_states):
+    if not isinstance(marked_states, list):
+        marked_states = [marked_states]
+    
+    # length of bits
+    num_qubits = len(marked_states[0])
+
+    qc = QuantumCircuit(num_qubits)
+    for target in marked_states:
+        # bitfilp
+        rev_target = target[::-1]
+        # get an index with a value of 0 as an array
+        zero_inds = [ind for ind in range(num_qubits) if rev_target.startswith("0", ind)]          
+        qc.x(zero_inds)
+        qc.compose(MCMT(ZGate(), num_qubits - 1, 1), inplace=True)
+        qc.x(zero_inds)
+        # The phase changes only what want to find it
+    return qc
+
+marked_states = ["101001"]
+#marked_states = ["101011", "010111"]
+
+circ_oracle = Oracle(marked_states)
+circ_oracle.draw(output="mpl")
+
+num_bits = len(marked_states[0])
+
+# matrix R
+def RMatrix(num_bits):
+    mat_R = np.zeros((2**num_bits, 2**num_bits))
+    for i in range(2**num_bits):
+        for j in range(2**num_bits):
+            if i != j:
+                mat_R[i][j] = 0
+            else:
+                if i == 0:
+                    mat_R[i][j] = 1
+                else:
+                    mat_R[i][j] = -1
+    return mat_R
+    
+R = RMatrix(num_bits)
+
+# represent as binary to bitwise dot product
+get_bin = lambda x, n: format(x, 'b').zfill(n)
+# matrix W
+def WMatrix(num_bits):
+    mat_W = np.zeros((2**num_bits, 2**num_bits))
+    for i in range(2**num_bits):
+        for j in range(2**num_bits):
+            i_b = get_bin(i, num_bits)
+            j_b = get_bin(j, num_bits)
+            bitsum = 0
+            for k in range(num_bits):
+                if int(i_b[k])*int(j_b[k]) == 1:
+                    bitsum += 1
+            if bitsum % 2 == 0:
+                mat_W[i][j] = 1
+            else:
+                mat_W[i][j] = -1
+    return mat_W
+
+W = WMatrix(num_bits)
+
+# D matrix is WRW
+D = np.dot(np.dot(W,R), W) / 2**num_bits
+D_op = qi.Operator(D)
+
+oracle_op = qi.Operator(circ_oracle)
+
+q = QuantumRegister(num_bits)
+qc = QuantumCircuit(q)
+qc.h(range(num_bits))
+# iterate sqrt(N/K) times
+num_iteration = math.ceil(math.sqrt(num_bits) / len(marked_states))
+for i in range(math.ceil(num_iteration)):
+    qc.unitary(oracle_op, q, label="O")
+    qc.unitary(D_op, q, label="D")
+qc.measure_all()
+qc.draw("mpl")
+
+aersim = AerSimulator()
+result_ideal = aersim.run(qc).result()
+counts_ideal = result_ideal.get_counts(0)
+print('Counts(ideal):', counts_ideal)
+
+provider = QiskitRuntimeService()
+backend = provider.get_backend("ibm_kyoto")
+aersim_backend = AerSimulator.from_backend(backend)
+result_noise = aersim_backend.run(qc).result()
+counts_noise = result_noise.get_counts(0)
+print(counts_noise)
